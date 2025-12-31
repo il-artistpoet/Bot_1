@@ -8,6 +8,8 @@ from datetime import datetime
 from flask import Flask, request
 import time
 import sys
+import asyncpg
+import asyncio
 
 # ========== РЕЖИМ ТЕСТИРОВАНИЯ ==========
 # На телефоне: TEST_MODE = True
