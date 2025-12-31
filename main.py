@@ -1,96 +1,135 @@
-# Пленэрный Клуб Бот - ФИНАЛЬНАЯ ВЕРСИЯ с PostgreSQL
-# Работает на Render и Pydroid 3
-
+# Пленэрный Клуб Бот - РАБОЧАЯ ВЕРСИЯ
 import os
 import telebot
 import logging
 from datetime import datetime
 from flask import Flask, request
 import time
-import sys
-import asyncpg
-import asyncio
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 
+print("🚀 Бот запускается...")
 
-# ========== БАЗА ДАННЫХ PostgreSQL ==========
-# Проверяем версию Python для psycopg2
-if sys.version_info[:2] >= (3, 13):
-    print("⚠️ ВНИМАНИЕ: psycopg2 не работает с Python 3.13!")
-    print("Используется режим без базы данных")
-    USE_DATABASE = False
-else:
-    USE_DATABASE = True
-    try:
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        print("✅ psycopg2 загружен успешно")
-    except ImportError:
-        print("❌ psycopg2 не установлен")
-        USE_DATABASE = False
+# ========== НАСТРОЙКИ ==========
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8432420548:AAGX_EqsarA7q_Jx4iNL2zV8j3c_JWd_POU')
+CHANNEL_ID = "-1003227241488"
+ADMIN_ID = 644037215
+TILDA_LINK = "https://pleinairclub.tilda.ws/"
 
-def get_db_connection():
-    """Подключение к PostgreSQL"""
-    if not USE_DATABASE:
-        return None
+# Реквизиты
+SBER_PHONE = "+79043323607"
+SBER_CARD = "2202208262152375"
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ========== БАЗА ДАННЫХ PostgreSQL через SQLAlchemy ==========
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
+if not DATABASE_URL:
+    logger.error("❌ DATABASE_URL не найден!")
+    DATABASE_URL = 'sqlite:///temp.db'  # Фолбэк на SQLite если нет PostgreSQL
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
     
-    try:
-        database_url = os.environ.get('DATABASE_URL')
-        if not database_url:
-            print("⚠️ DATABASE_URL не найден")
-            return None
-        
-        # Фикс URL для psycopg2
-        if database_url.startswith('postgres://'):
-            database_url = database_url.replace('postgres://', 'postgresql://', 1)
-        
-        conn = psycopg2.connect(
-            database_url,
-            cursor_factory=RealDictCursor
-        )
-        return conn
-    except Exception as e:
-        print(f"❌ Ошибка подключения: {e}")
-        return None
+    user_id = Column(BigInteger, primary_key=True)
+    username = Column(String(100))
+    first_name = Column(String(100))
+    last_name = Column(String(100))
+    tariff = Column(String(50))
+    amount = Column(Integer, default=0)
+    paid = Column(Integer, default=0)
+    screenshot_date = Column(DateTime)
+    registered_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-# Простые функции работы с БД
+def init_db():
+    """Создание таблиц"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Таблицы базы данных созданы/проверены")
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания таблиц: {e}")
+
 def get_user(user_id):
     """Получить пользователя"""
-    conn = get_db_connection()
-    if not conn:
-        return None
-    
+    session = SessionLocal()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-            return cur.fetchone()
-    except Exception as e:
-        print(f"❌ Ошибка get_user: {e}")
+        user = session.query(User).filter(User.user_id == user_id).first()
+        if user:
+            return {
+                'user_id': user.user_id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'tariff': user.tariff,
+                'amount': user.amount,
+                'paid': user.paid,
+                'screenshot_date': user.screenshot_date
+            }
         return None
     finally:
-        if conn:
-            conn.close()
+        session.close()
 
 def save_user(user_id, **kwargs):
-    """Сохранить пользователя"""
-    conn = get_db_connection()
-    if not conn:
-        return False
-    
+    """Сохранить или обновить пользователя"""
+    session = SessionLocal()
     try:
-        with conn.cursor() as cur:
-            # Ваш код UPSERT
-            cur.execute("""
-                INSERT INTO users (user_id, ...) VALUES (%s, ...)
-                ON CONFLICT (user_id) DO UPDATE SET ...
-            """, (user_id, ...))
-            conn.commit()
-            return True
+        user = session.query(User).filter(User.user_id == user_id).first()
+        
+        if user:
+            # Обновляем существующего
+            for key, value in kwargs.items():
+                if value is not None and hasattr(user, key):
+                    setattr(user, key, value)
+            user.updated_at = datetime.now()
+        else:
+            # Создаем нового
+            user = User(user_id=user_id, **kwargs)
+            session.add(user)
+        
+        session.commit()
+        logger.info(f"✅ Пользователь {user_id} сохранен")
+        return True
     except Exception as e:
-        print(f"❌ Ошибка save_user: {e}")
+        session.rollback()
+        logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
         return False
     finally:
-        if conn:
-            conn.close()
+        session.close()
+
+def update_payment(user_id):
+    """Обновить статус оплаты"""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.user_id == user_id).first()
+        if user:
+            user.paid = 1
+            user.screenshot_date = datetime.now()
+            user.updated_at = datetime.now()
+            session.commit()
+            logger.info(f"✅ Оплата обновлена для {user_id}")
+            return True
+        return False
+    except Exception as e:
+        session.rollback()
+        logger.error(f"❌ Ошибка обновления оплаты {user_id}: {e}")
+        return False
+    finally:
+        session.close()
             
 # ========== РЕЖИМ ТЕСТИРОВАНИЯ ==========
 # На телефоне: TEST_MODE = True
