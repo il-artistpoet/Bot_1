@@ -7,19 +7,135 @@ import logging
 from datetime import datetime
 from flask import Flask, request
 import time
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import os
 import sys
 
-# Форсируем Python 3.11
-required_version = (3, 11)
-current_version = sys.version_info[:2]
+# ========== РЕЖИМ ТЕСТИРОВАНИЯ ==========
+# На телефоне: TEST_MODE = True
+# На Render: TEST_MODE = False
+TEST_MODE = False
 
-if current_version != required_version:
-    print(f"Требуется Python {required_version[0]}.{required_version[1]}, а у вас {current_version[0]}.{current_version[1]}")
-    print("На Render добавьте runtime.txt с python-3.11")
-    # Не выходим, но логируем
+if TEST_MODE:
+    print("📱 РЕЖИМ ТЕСТИРОВАНИЯ: Используем временную базу данных")
+    # Создаем временную базу в памяти
+    import sqlite3
+    from sqlite3 import Row
+    
+    # Заглушка для подключения к БД
+    def get_db_connection():
+        conn = sqlite3.connect(':memory:', check_same_thread=False)
+        conn.row_factory = Row
+        
+        # Создаем таблицу если её нет
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                tariff TEXT,
+                amount INTEGER DEFAULT 0,
+                paid INTEGER DEFAULT 0,
+                screenshot_date TEXT,
+                registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        return conn
+    
+    # Переопределяем асинхронные функции на синхронные
+    def run_async(func):
+        return func
+    
+    def get_user_sync(user_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return dict(result) if result else None
+    
+    def save_user_sync(user_id, username=None, first_name=None, last_name=None, 
+                      tariff=None, amount=0, paid=0):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO users 
+            (user_id, username, first_name, last_name, tariff, amount, paid, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """, (user_id, username, first_name, last_name, tariff, amount, paid))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def update_payment_status_sync(user_id, paid=1):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE users 
+            SET paid = ?, screenshot_date = datetime('now'), updated_at = datetime('now')
+            WHERE user_id = ?
+        """, (paid, user_id))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    # Функции статистики для тестирования
+    def get_user_count_sync():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        result = cursor.fetchone()[0]
+        conn.close()
+        return result or 0
+    
+    def get_paid_users_count_sync():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users WHERE paid = 1")
+        result = cursor.fetchone()[0]
+        conn.close()
+        return result or 0
+    
+    def get_total_income_sync():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(amount) FROM users WHERE paid = 1")
+        result = cursor.fetchone()[0]
+        conn.close()
+        return result or 0
+    
+    def get_tariff_stats_sync():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT tariff, COUNT(*) as count FROM users WHERE paid = 1 GROUP BY tariff")
+        rows = cursor.fetchall()
+        
+        stats = {"читатель": 0, "участник": 0}
+        for row in rows:
+            if row[0] in stats:
+                stats[row[0]] = row[1]
+        
+        conn.close()
+        return stats
+    
+    # Инициализация БД для тестирования
+    def init_db():
+        # Уже создали таблицу в get_db_connection()
+        print("✅ База данных SQLite инициализирована")
+    
+else:
+    # Реальный код для Render с PostgreSQL
+    import asyncpg
+    import asyncio
+    
+    # ... ваш существующий код с asyncpg ...
     
 # Фикс для Render PostgreSQL URL
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -42,252 +158,251 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== БАЗА ДАННЫХ PostgreSQL ==========
-def get_db_connection():
-    """Подключение к PostgreSQL"""
+# ========== БАЗА ДАННЫХ PostgreSQL с asyncpg ==========
+import asyncpg
+import asyncio
+
+async def get_db_connection():
+    """Подключение к PostgreSQL через asyncpg"""
     try:
-        # На Render используйте DATABASE_URL из настроек
-        # Для локального тестирования можно временно использовать SQLite
         database_url = os.environ.get('DATABASE_URL')
-        
         if not database_url:
-            logger.error("❌ DATABASE_URL не найден в переменных окружения")
-            # Для тестирования на телефоне можно временно вернуть None
+            logger.warning("⚠️ DATABASE_URL не найден")
             return None
             
-        conn = psycopg2.connect(
-            database_url,
-            cursor_factory=RealDictCursor,
-            sslmode='require'  # Для Render требуется SSL
-        )
-        logger.info("✅ Успешное подключение к PostgreSQL")
+        # Исправляем URL для asyncpg
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+            
+        conn = await asyncpg.connect(database_url)
+        logger.info("✅ Подключение к PostgreSQL установлено")
         return conn
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
         return None
 
-def init_db():
+async def init_db():
     """Создание таблиц при старте"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         logger.error("❌ Не удалось подключиться к БД для инициализации")
-        # Создаем таблицы при следующем успешном подключении
         return
     
     try:
-        with conn.cursor() as cursor:
-            # Основная таблица пользователей
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username VARCHAR(100),
-                    first_name VARCHAR(100),
-                    last_name VARCHAR(100),
-                    tariff VARCHAR(50),
-                    amount INTEGER DEFAULT 0,
-                    paid INTEGER DEFAULT 0,
-                    screenshot_date TIMESTAMP,
-                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Создаем индекс для быстрого поиска
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_paid ON users(paid)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_tariff ON users(tariff)")
-            
-            conn.commit()
-            logger.info("✅ Таблицы PostgreSQL успешно созданы/проверены")
-            
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(100),
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                tariff VARCHAR(50),
+                amount INTEGER DEFAULT 0,
+                paid INTEGER DEFAULT 0,
+                screenshot_date TIMESTAMP,
+                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Создаем индексы если их нет
+        try:
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_paid ON users(paid)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tariff ON users(tariff)")
+        except:
+            pass  # Индексы уже существуют
+        
+        logger.info("✅ Таблицы PostgreSQL успешно созданы/проверены")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
-        conn.rollback()
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-# ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
-def get_user(user_id):
+async def get_user(user_id):
     """Получить пользователя по ID"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         logger.warning(f"⚠️ Нет подключения к БД при запросе пользователя {user_id}")
         return None
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT user_id, username, first_name, last_name, 
-                       tariff, amount, paid, screenshot_date, 
-                       registered_at, updated_at 
-                FROM users 
-                WHERE user_id = %s
-            """, (user_id,))
-            result = cursor.fetchone()
-            return result
+        row = await conn.fetchrow("""
+            SELECT user_id, username, first_name, last_name, 
+                   tariff, amount, paid, screenshot_date, 
+                   registered_at, updated_at 
+            FROM users 
+            WHERE user_id = $1
+        """, user_id)
+        
+        if row:
+            # Преобразуем Record в словарь
+            return dict(row)
+        return None
     except Exception as e:
         logger.error(f"❌ Ошибка получения пользователя {user_id}: {e}")
         return None
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def save_user(user_id, username=None, first_name=None, last_name=None, 
-              tariff=None, amount=0, paid=0):
+async def save_user(user_id, username=None, first_name=None, last_name=None, 
+                   tariff=None, amount=0, paid=0):
     """Сохранить или обновить пользователя"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         logger.warning(f"⚠️ Нет подключения к БД при сохранении пользователя {user_id}")
         return False
     
     try:
-        with conn.cursor() as cursor:
-            # Используем UPSERT (INSERT ... ON CONFLICT)
-            cursor.execute("""
-                INSERT INTO users 
-                (user_id, username, first_name, last_name, tariff, amount, paid, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    username = EXCLUDED.username,
-                    first_name = EXCLUDED.first_name,
-                    last_name = EXCLUDED.last_name,
-                    tariff = EXCLUDED.tariff,
-                    amount = EXCLUDED.amount,
-                    paid = EXCLUDED.paid,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (user_id, username, first_name, last_name, tariff, amount, paid))
-            
-            conn.commit()
-            logger.info(f"✅ Пользователь {user_id} сохранен/обновлен в PostgreSQL")
-            return True
-            
+        await conn.execute("""
+            INSERT INTO users 
+            (user_id, username, first_name, last_name, tariff, amount, paid, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                tariff = EXCLUDED.tariff,
+                amount = EXCLUDED.amount,
+                paid = EXCLUDED.paid,
+                updated_at = CURRENT_TIMESTAMP
+        """, user_id, username, first_name, last_name, tariff, amount, paid)
+        
+        logger.info(f"✅ Пользователь {user_id} сохранен/обновлен в PostgreSQL")
+        return True
+        
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
-        conn.rollback()
         return False
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def update_payment_status(user_id, paid=1):
+async def update_payment_status(user_id, paid=1):
     """Обновить статус оплаты"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         logger.warning(f"⚠️ Нет подключения к БД при обновлении оплаты {user_id}")
         return False
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                UPDATE users 
-                SET paid = %s, 
-                    screenshot_date = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = %s
-            """, (paid, user_id))
-            
-            affected_rows = cursor.rowcount
-            conn.commit()
-            
-            if affected_rows > 0:
-                logger.info(f"✅ Статус оплаты обновлен для {user_id}")
-                return True
-            else:
-                logger.warning(f"⚠️ Пользователь {user_id} не найден при обновлении оплаты")
-                return False
-                
+        await conn.execute("""
+            UPDATE users 
+            SET paid = $1, 
+                screenshot_date = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $2
+        """, paid, user_id)
+        
+        logger.info(f"✅ Статус оплаты обновлен для {user_id}")
+        return True
     except Exception as e:
         logger.error(f"❌ Ошибка обновления оплаты {user_id}: {e}")
-        conn.rollback()
         return False
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def get_user_count():
+async def get_user_count():
     """Получить общее количество пользователей"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         return 0
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as count FROM users")
-            result = cursor.fetchone()
-            return result['count'] if result else 0
+        result = await conn.fetchval("SELECT COUNT(*) FROM users")
+        return result or 0
     except Exception as e:
         logger.error(f"❌ Ошибка получения количества пользователей: {e}")
         return 0
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def get_paid_users_count():
+async def get_paid_users_count():
     """Получить количество оплативших пользователей"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         return 0
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as count FROM users WHERE paid = 1")
-            result = cursor.fetchone()
-            return result['count'] if result else 0
+        result = await conn.fetchval("SELECT COUNT(*) FROM users WHERE paid = 1")
+        return result or 0
     except Exception as e:
         logger.error(f"❌ Ошибка получения количества оплативших: {e}")
         return 0
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def get_total_income():
+async def get_total_income():
     """Получить общий доход"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         return 0
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT SUM(amount) as total FROM users WHERE paid = 1")
-            result = cursor.fetchone()
-            return result['total'] if result and result['total'] else 0
+        result = await conn.fetchval("SELECT SUM(amount) FROM users WHERE paid = 1")
+        return result or 0
     except Exception as e:
         logger.error(f"❌ Ошибка получения общего дохода: {e}")
         return 0
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
 
-def get_tariff_stats():
+async def get_tariff_stats():
     """Получить статистику по тарифам"""
-    conn = get_db_connection()
+    conn = await get_db_connection()
     if not conn:
         return {"читатель": 0, "участник": 0}
     
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT tariff, COUNT(*) as count 
-                FROM users 
-                WHERE paid = 1 AND tariff IS NOT NULL
-                GROUP BY tariff
-            """)
-            results = cursor.fetchall()
-            
-            stats = {"читатель": 0, "участник": 0}
-            for row in results:
-                tariff = row['tariff']
-                count = row['count']
-                if tariff in stats:
-                    stats[tariff] = count
-            
-            return stats
+        rows = await conn.fetch("""
+            SELECT tariff, COUNT(*) as count 
+            FROM users 
+            WHERE paid = 1 AND tariff IS NOT NULL
+            GROUP BY tariff
+        """)
+        
+        stats = {"читатель": 0, "участник": 0}
+        for row in rows:
+            tariff = row['tariff']
+            count = row['count']
+            if tariff in stats:
+                stats[tariff] = count
+        
+        return stats
     except Exception as e:
         logger.error(f"❌ Ошибка получения статистики по тарифам: {e}")
         return {"читатель": 0, "участник": 0}
     finally:
-        if conn:
-            conn.close()
+        await conn.close()
+
+# ========== СИНХРОННЫЕ ОБЕРТКИ ДЛЯ TELEGRAM БОТА ==========
+def run_async(coro):
+    """Запуск асинхронной функции в синхронном контексте"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+def get_user_sync(user_id):
+    return run_async(get_user(user_id))
+
+def save_user_sync(user_id, **kwargs):
+    return run_async(save_user(user_id, **kwargs))
+
+def update_payment_status_sync(user_id, paid=1):
+    return run_async(update_payment_status(user_id, paid))
+
+def get_user_count_sync():
+    return run_async(get_user_count())
+
+def get_paid_users_count_sync():
+    return run_async(get_paid_users_count())
+
+def get_total_income_sync():
+    return run_async(get_total_income())
+
+def get_tariff_stats_sync():
+    return run_async(get_tariff_stats())
 
 # ========== ВЕБХУК ДЛЯ RENDER ==========
 @app.route('/')
@@ -339,10 +454,10 @@ def home():
 def health():
     """Health check endpoint for Render"""
     try:
-        # Проверяем подключение к БД
-        conn = get_db_connection()
+        # Просто проверяем подключение
+        conn = run_async(get_db_connection())
         if conn:
-            conn.close()
+            # Не закрываем соединение здесь
             return {
                 "status": "healthy",
                 "database": "connected",
@@ -382,7 +497,7 @@ def start(message):
     logger.info(f"🚀 /start от {user_id} (@{username})")
     
     # Сохраняем пользователя в БД
-    save_user(
+    save_user_sync(
         user_id=user_id,
         username=username,
         first_name=first_name,
@@ -476,7 +591,7 @@ def handle_tariff(call):
     logger.info(f"🎯 Выбор тарифа: {selected_tariff} ({selected_amount}₽) для {user_id}")
     
     # Получаем текущие данные пользователя
-    user = get_user(user_id)
+    user = get_user_sync(user_id)
     
     if user:
         current_tariff = user['tariff']
@@ -524,7 +639,7 @@ def handle_tariff(call):
                 return
     
     # Если пользователя нет ИЛИ не оплатил - сохраняем выбор
-    save_user(
+    save_user_sync(
         user_id=user_id,
         tariff=selected_tariff,
         amount=selected_amount,
@@ -555,7 +670,7 @@ def handle_upgrade(call):
     logger.info(f"🔄 Апгрейд тарифа для {user_id}")
     
     # Получаем текущие данные
-    user = get_user(user_id)
+    user = get_user_sync(user_id)
     
     if not user or user['tariff'] != "читатель":
         bot.answer_callback_query(call.id, "❌ Нельзя выполнить апгрейд")
@@ -566,7 +681,7 @@ def handle_upgrade(call):
     to_pay = new_amount - current_amount  # 400₽
     
     # Обновляем тариф в базе (paid остаётся 1)
-    save_user(
+    save_user_sync(
         user_id=user_id,
         tariff=new_tariff,
         amount=new_amount,
@@ -597,13 +712,15 @@ def handle_photo(message):
     logger.info(f"📸 Получен скриншот от {user_id}")
     
     # Получаем данные пользователя
-    user = get_user(user_id)
+    user = get_user_sync(user_id)
     
     if not user:
         bot.reply_to(message, "❌ Сначала выберите тариф командой /start")
         return
     
-    tariff, amount, paid = user['tariff'], user['amount'], user['paid']
+    tariff = user['tariff']
+    amount = user['amount']
+    paid = user['paid']
     
     # Если уже оплатил - проверяем апгрейд
     if paid == 1:
@@ -630,7 +747,7 @@ def handle_photo(message):
         return
     
     # Если НЕ оплачивал - обновляем статус
-    success = update_payment_status(user_id, 1)
+    success = update_payment_status_sync(user_id, 1)
     
     if not success:
         bot.reply_to(message, "❌ Ошибка обновления статуса оплаты. Попробуйте еще раз.")
@@ -690,7 +807,7 @@ def my_tariff(message):
     user_id = message.from_user.id
     logger.info(f"📊 Запрос тарифа от {user_id}")
     
-    user = get_user(user_id)
+    user = get_user_sync(user_id)
     
     if not user:
         bot.reply_to(message, "❌ Вы еще не выбирали тариф. Используйте /start")
@@ -742,39 +859,55 @@ def remind_all(message):
     
     logger.info("🔔 Админ запустил рассылку напоминаний")
     
-    conn = get_db_connection()
-    if not conn:
-        bot.reply_to(message, "❌ Ошибка подключения к БД")
-        return
-    
+    # Получаем пользователей, которым нужно напомнить
     try:
-        with conn.cursor() as cursor:
-            # Находим всех, кто оплатил больше 25 дней назад
-            # (даем 5 дней на оплату после напоминания)
-            cursor.execute("""
-                SELECT user_id, first_name, tariff, screenshot_date 
-                FROM users 
-                WHERE paid = 1 
-                AND screenshot_date IS NOT NULL
-                AND screenshot_date <= CURRENT_DATE - INTERVAL '25 days'
-            """)
+        # Создаем новое подключение для напоминаний
+        async def get_users_to_remind():
+            conn = await get_db_connection()
+            if not conn:
+                return []
             
-            users = cursor.fetchall()
-            
-            if not users:
-                bot.reply_to(message, "✅ Все подписки активны! Нет пользователей для напоминания.")
-                return
-            
-            count = 0
-            errors = 0
-            
-            for user in users:
-                try:
-                    user_id = user['user_id']
-                    first_name = user['first_name'] or "Пользователь"
-                    tariff = user['tariff'] or "неизвестный"
-                    
-                    reminder_text = f"""🔔 Здравствуйте, {first_name}!
+            try:
+                # Находим всех, кто оплатил больше 25 дней назад
+                rows = await conn.fetch("""
+                    SELECT user_id, first_name, tariff, screenshot_date 
+                    FROM users 
+                    WHERE paid = 1 
+                    AND screenshot_date IS NOT NULL
+                    AND screenshot_date < CURRENT_TIMESTAMP - INTERVAL '25 days'
+                """)
+                
+                users = []
+                for row in rows:
+                    users.append({
+                        'user_id': row['user_id'],
+                        'first_name': row['first_name'] or "Пользователь",
+                        'tariff': row['tariff'] or "неизвестный",
+                        'screenshot_date': row['screenshot_date']
+                    })
+                
+                return users
+            finally:
+                await conn.close()
+        
+        # Получаем список пользователей
+        users_to_remind = run_async(get_users_to_remind())
+        
+        if not users_to_remind:
+            bot.reply_to(message, "✅ Все подписки активны! Нет пользователей для напоминания.")
+            return
+        
+        count = 0
+        errors = 0
+        
+        # Отправляем напоминания
+        for user in users_to_remind:
+            try:
+                user_id = user['user_id']
+                first_name = user['first_name']
+                tariff = user['tariff']
+                
+                reminder_text = f"""🔔 Здравствуйте, {first_name}!
 
 Ваша подписка на тарифе "{tariff.upper()}" скоро закончится!
 
@@ -782,68 +915,99 @@ def remind_all(message):
 Для продления подписки напишите команду /start
 
 Если у вас есть вопросы, пишите @artistilja"""
-                    
-                    bot.send_message(user_id, reminder_text)
-                    count += 1
-                    
-                    # Небольшая пауза, чтобы не спамить
-                    time.sleep(0.5)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка отправки напоминания {user['user_id']}: {e}")
-                    errors += 1
-            
-            report = f"""📨 РЕЗУЛЬТАТ РАССЫЛКИ:
+                
+                bot.send_message(user_id, reminder_text)
+                count += 1
+                
+                # Небольшая пауза, чтобы не спамить
+                time.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки напоминания {user['user_id']}: {e}")
+                errors += 1
+        
+        report = f"""📨 РЕЗУЛЬТАТ РАССЫЛКИ:
 
-Всего найдено: {len(users)}
+Всего найдено: {len(users_to_remind)}
 Успешно отправлено: {count}
 Ошибок: {errors}
 
 Следующую рассылку можно сделать через 3 дня."""
-            
-            bot.reply_to(message, report)
-            
+        
+        bot.reply_to(message, report)
+        
     except Exception as e:
         logger.error(f"❌ Ошибка в команде /remind: {e}")
         bot.reply_to(message, f"❌ Ошибка при рассылке: {str(e)[:100]}")
-    finally:
-        if conn:
-            conn.close()
 
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    """Статистика"""
-    if message.from_user.id != ADMIN_ID:
+    """Статистика для администратора"""
+    user_id = message.from_user.id
+    
+    if user_id != ADMIN_ID:
         bot.reply_to(message, "❌ Эта команда только для администратора")
         return
     
     logger.info("📊 Запрос статистики от админа")
     
-    # Получаем все статистики
-    total_users = get_user_count()
-    paid_users = get_paid_users_count()
-    total_income = get_total_income()
-    tariff_stats = get_tariff_stats()
-    
-    stats_text = f"""
+    try:
+        # Получаем статистику через асинхронные функции
+        async def get_all_stats():
+            conn = await get_db_connection()
+            if not conn:
+                return None
+            
+            try:
+                # Общее количество пользователей
+                total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+                
+                # Количество оплативших
+                paid_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE paid = 1") or 0
+                
+                # Общий доход
+                total_income = await conn.fetchval("SELECT SUM(amount) FROM users WHERE paid = 1") or 0
+                
+                # Статистика по тарифам
+                readers = await conn.fetchval("SELECT COUNT(*) FROM users WHERE tariff = 'читатель' AND paid = 1") or 0
+                members = await conn.fetchval("SELECT COUNT(*) FROM users WHERE tariff = 'участник' AND paid = 1") or 0
+                
+                return {
+                    'total': total_users,
+                    'paid': paid_users,
+                    'income': total_income,
+                    'readers': readers,
+                    'members': members
+                }
+            finally:
+                await conn.close()
+        
+        stats_data = run_async(get_all_stats())
+        
+        if stats_data is None:
+            bot.reply_to(message, "❌ Не удалось получить статистику. Проверьте подключение к БД.")
+            return
+        
+        stats_text = f"""
 📊 СТАТИСТИКА ПЛЕНЭРНОГО КЛУБА
 
-👥 Всего пользователей: {total_users}
-💰 Оплатили подписку: {paid_users}
-💵 Общий доход: {total_income}₽
+👥 Всего пользователей: {stats_data['total']}
+💰 Оплатили подписку: {stats_data['paid']}
+💵 Общий доход: {stats_data['income']}₽
 
 📈 ПО ТАРИФАМ:
-📖 Читатели: {tariff_stats.get('читатель', 0)}
-💎 Участники: {tariff_stats.get('участник', 0)}
+📖 Читатели: {stats_data['readers']}
+💎 Участники: {stats_data['members']}
 
-🔔 Управление:
-/remind - напомнить об оплате
-/stats - обновить статистику
-
-⏰ Последнее обновление: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+🔔 Для напоминаний: /remind
+⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 """
-    
-    bot.reply_to(message, stats_text)
+        
+        bot.reply_to(message, stats_text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в команде /stats: {e}")
+        bot.reply_to(message, f"❌ Ошибка получения статистики: {str(e)[:100]}")
 
 @bot.message_handler(commands=['test'])
 def test(message):
@@ -852,11 +1016,11 @@ def test(message):
     logger.info(f"🧪 Тестовая команда от {user_id}")
     
     # Проверяем подключение к БД
-    conn = get_db_connection()
+    conn = run_async(get_db_connection())
     db_status = "✅ Подключено" if conn else "❌ Не подключено"
     
     if conn:
-        conn.close()
+        run_async(conn.close())
     
     test_message = f"""🧪 ТЕСТ СИСТЕМЫ
 
@@ -884,7 +1048,7 @@ def help_command(message):
 
 Для администратора:
 /stats - Статистика
-/remind - Напомнить об оплате
+/remind - Напомнить об оплате (временно не работает)
 
 Если у вас возникли проблемы:
 1. Проверьте, выбрали ли вы тариф
@@ -907,7 +1071,7 @@ def handle_text(message):
     # Если сообщение похоже на вопрос об оплате
     if any(word in text.lower() for word in ['оплат', 'платёж', 'сбер', 'перевод', 'скриншот']):
         # Проверяем статус пользователя
-        user = get_user(user_id)
+        user = get_user_sync(user_id)
         
         if not user:
             bot.reply_to(message, "❌ Сначала выберите тариф через /start")
@@ -950,7 +1114,7 @@ def handle_text(message):
 if __name__ == '__main__':
     # Инициализация базы данных
     logger.info("🤖 Инициализация бота...")
-    init_db()
+    run_async(init_db())
     
     # Проверяем, запущены ли на Render
     is_render = os.getenv('RENDER', False)
