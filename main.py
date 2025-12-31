@@ -11,6 +11,87 @@ import sys
 import asyncpg
 import asyncio
 
+
+# ========== БАЗА ДАННЫХ PostgreSQL ==========
+# Проверяем версию Python для psycopg2
+if sys.version_info[:2] >= (3, 13):
+    print("⚠️ ВНИМАНИЕ: psycopg2 не работает с Python 3.13!")
+    print("Используется режим без базы данных")
+    USE_DATABASE = False
+else:
+    USE_DATABASE = True
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        print("✅ psycopg2 загружен успешно")
+    except ImportError:
+        print("❌ psycopg2 не установлен")
+        USE_DATABASE = False
+
+def get_db_connection():
+    """Подключение к PostgreSQL"""
+    if not USE_DATABASE:
+        return None
+    
+    try:
+        database_url = os.environ.get('DATABASE_URL')
+        if not database_url:
+            print("⚠️ DATABASE_URL не найден")
+            return None
+        
+        # Фикс URL для psycopg2
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        
+        conn = psycopg2.connect(
+            database_url,
+            cursor_factory=RealDictCursor
+        )
+        return conn
+    except Exception as e:
+        print(f"❌ Ошибка подключения: {e}")
+        return None
+
+# Простые функции работы с БД
+def get_user(user_id):
+    """Получить пользователя"""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+            return cur.fetchone()
+    except Exception as e:
+        print(f"❌ Ошибка get_user: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def save_user(user_id, **kwargs):
+    """Сохранить пользователя"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            # Ваш код UPSERT
+            cur.execute("""
+                INSERT INTO users (user_id, ...) VALUES (%s, ...)
+                ON CONFLICT (user_id) DO UPDATE SET ...
+            """, (user_id, ...))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"❌ Ошибка save_user: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+            
 # ========== РЕЖИМ ТЕСТИРОВАНИЯ ==========
 # На телефоне: TEST_MODE = True
 # На Render: TEST_MODE = False
