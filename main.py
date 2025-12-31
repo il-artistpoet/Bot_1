@@ -9,6 +9,13 @@ from flask import Flask, request
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import sys
+
+# Принудительно проверяем версию Python
+if sys.version_info >= (3, 13):
+    print("❌ Python 3.13 не поддерживается! Требуется Python 3.11")
+    print("На Render укажите Python 3.11 в runtime.txt и render.yaml")
+    sys.exit(1)
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8432420548:AAGX_EqsarA7q_Jx4iNL2zV8j3c_JWd_POU')
