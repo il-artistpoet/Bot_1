@@ -9,13 +9,22 @@ from flask import Flask, request
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import os
 import sys
 
-# Принудительно проверяем версию Python
-if sys.version_info >= (3, 13):
-    print("❌ Python 3.13 не поддерживается! Требуется Python 3.11")
-    print("На Render укажите Python 3.11 в runtime.txt и render.yaml")
-    sys.exit(1)
+# Форсируем Python 3.11
+required_version = (3, 11)
+current_version = sys.version_info[:2]
+
+if current_version != required_version:
+    print(f"Требуется Python {required_version[0]}.{required_version[1]}, а у вас {current_version[0]}.{current_version[1]}")
+    print("На Render добавьте runtime.txt с python-3.11")
+    # Не выходим, но логируем
+    
+# Фикс для Render PostgreSQL URL
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    os.environ['DATABASE_URL'] = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8432420548:AAGX_EqsarA7q_Jx4iNL2zV8j3c_JWd_POU')
